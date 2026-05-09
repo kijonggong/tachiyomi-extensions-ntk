@@ -1,7 +1,7 @@
-{
-  "meta": {
-    "name": "NTK Repo",
-    "website": "https://kijonggong.github.io/tachiyomi-extensions-ntk",
-    "signingKeyFingerprint": "9236870b3db9041df34b2693d34551d4d0735c5dabcc02b9d998717396513806"
-  }
+﻿{
+    "meta":  {
+                 "signingKeyFingerprint":  "9236870b3db9041df34b2693d34551d4d0735c5dabcc02b9d998717396513806",
+                 "name":  "NTK Repo",
+                 "website":  "https://kijonggong.github.io/tachiyomi-extensions-ntk"
+             }
 }
