@@ -1,0 +1,39 @@
+{
+  "name": "NTK Repo",
+  "badgeLabel": "NTK",
+  "signingKey": "9236870b3db9041df34b2693d34551d4d0735c5dabcc02b9d998717396513806",
+  "contact": {
+    "website": "https://kijonggong.github.io/tachiyomi-extensions-ntk"
+  },
+  "extensionList": {
+    "extensions": [
+      {
+        "name": "NTK",
+        "packageName": "eu.kanade.tachiyomi.extension.ko.ntk",
+        "resources": {
+          "apkUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/apk/tachiyomi-ko.ntk-v1.4.20.apk",
+          "iconUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/icon/eu.kanade.tachiyomi.extension.ko.ntk.png",
+          "jarUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/jar/tachiyomi-ko.ntk-v1.4.20.jar"
+        },
+        "extensionLib": "1.4",
+        "versionCode": "20",
+        "versionName": "1.4.20",
+        "contentWarning": "CONTENT_WARNING_NSFW",
+        "sources": [
+          {
+            "id": "7381471216199971485",
+            "name": "NTK \ub9cc\ud654",
+            "language": "ko",
+            "homeUrl": "https://newtoki1.org"
+          },
+          {
+            "id": "2180431219753503027",
+            "name": "NTK \uc6f9\ud230",
+            "language": "ko",
+            "homeUrl": "https://newtoki1.org"
+          }
+        ]
+      }
+    ]
+  }
+}
