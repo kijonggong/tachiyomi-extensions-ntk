@@ -11,13 +11,13 @@
         "name": "NTK",
         "packageName": "eu.kanade.tachiyomi.extension.ko.ntk",
         "resources": {
-          "apkUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/apk/tachiyomi-ko.ntk-v1.4.23.apk",
+          "apkUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/apk/tachiyomi-ko.ntk-v1.4.25.apk",
           "iconUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/icon/eu.kanade.tachiyomi.extension.ko.ntk.png",
-          "jarUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/jar/tachiyomi-ko.ntk-v1.4.23.jar"
+          "jarUrl": "https://kijonggong.github.io/tachiyomi-extensions-ntk/jar/tachiyomi-ko.ntk-v1.4.25.jar"
         },
         "extensionLib": "1.4",
-        "versionCode": "23",
-        "versionName": "1.4.23",
+        "versionCode": "25",
+        "versionName": "1.4.25",
         "contentWarning": "CONTENT_WARNING_NSFW",
         "sources": [
           {
