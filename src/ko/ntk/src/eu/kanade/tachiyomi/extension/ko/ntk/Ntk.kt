@@ -1,123 +1,84 @@
 package eu.kanade.tachiyomi.extension.ko.ntk
 
-import android.app.Application
-import android.content.SharedPreferences
-import androidx.preference.EditTextPreference
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import keiyoushi.utils.attrOrNull
 import keiyoushi.utils.firstInstance
-import keiyoushi.utils.tryParse
-import okhttp3.Dns
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.textOrNull
+import keiyoushi.utils.tryParseDate
+import kotlinx.serialization.json.JsonElement
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
-import java.net.Inet4Address
-import java.text.SimpleDateFormat
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
-class Ntk(
-    override val name: String,
-    override val lang: String,
-    // Pinned to the ids the published v19 shipped (md5 of "<name>/ko/1"). Letting
-    // these regenerate would hand users new source ids and detach their libraries.
-    override val id: Long,
-) : HttpSource(),
-    ConfigurableSource {
+abstract class Ntk : KeiSource() {
 
-    // KSP generates the SourceFactory from build.gradle.kts and only ever passes
-    // name/lang/id, so the per-source paths have to be derived rather than injected.
-    private val sectionPath = if (id == MANHWA_ID) MANHWA_PATH else WEBTOON_PATH
+    // KSP generates subclasses from build.gradle.kts source blocks, so the
+    // per-source paths have to be derived from the injected id.
+    private val sectionPath by lazy { if (id == MANHWA_ID) MANHWA_PATH else WEBTOON_PATH }
 
     // Only 만화 has a dedicated "최신" page; 웹툰 reuses its listing sorted by update.
-    private val updatesPath = if (id == MANHWA_ID) "$MANHWA_PATH/updates" else null
+    private val updatesPath by lazy { if (id == MANHWA_ID) "$MANHWA_PATH/updates" else null }
 
-    override val supportsLatest = true
+    // Limit the site itself only. Thumbnails come from aws-cdn1.site and
+    // image-comic.pstatic.net, and throttling those stalls list scrolling.
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(2) { it.host == baseUrl.toHttpUrl().host }
+        .addInterceptor(NtkReaderInterceptor())
 
-    private val preferences: SharedPreferences by lazy {
-        Injekt.get<Application>().getSharedPreferences(SHARED_PREF_NAME, 0)
-    }
-
-    override val baseUrl: String
-        get() = preferences.getString(DOMAIN_PREF, DOMAIN_DEFAULT)!!.trimEnd('/')
-
-    override val client: OkHttpClient = network.client.newBuilder()
-        // Korean ISPs can SNI-block the site's Cloudflare IPv6 route.
-        .dns { hostname ->
-            val all = Dns.SYSTEM.lookup(hostname)
-            val (v4, v6) = all.partition { it is Inet4Address }
-            v4 + v6
-        }
-        // Limit only the main site, not its image CDN.
-        .rateLimit(2) { it.host == baseUrl.toHttpUrl().host }
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-        .add(
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
+        set(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/131.0.0.0 Safari/537.36",
         )
-        .add(
+        add(
             "Accept",
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         )
-        .add("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.8")
-
-    private val chapterDateFormat by lazy {
-        SimpleDateFormat("yyyy.MM.dd", Locale.KOREA)
+        add("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.8")
     }
 
-    override fun popularMangaRequest(page: Int): Request = listingRequest(page, "as_view")
+    private val chapterDateFormat = DateTimeFormatter.ofPattern("yyyy.MM.dd", Locale.KOREA)
 
-    override fun popularMangaParse(response: Response): MangasPage = listingParse(response)
+    override suspend fun getPopularManga(page: Int): MangasPage = listingParse(client.get(listingUrl(page, "as_view")).asJsoup())
 
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         if (updatesPath == null) {
-            return listingRequest(page, "as_update")
+            return listingParse(client.get(listingUrl(page, "as_update")).asJsoup())
         }
 
         val url = "$baseUrl$updatesPath".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .build()
-        return GET(url, headers)
+        return updatesParse(client.get(url).asJsoup())
     }
 
-    override fun latestUpdatesParse(response: Response): MangasPage = if (updatesPath == null) {
-        listingParse(response)
-    } else {
-        updatesParse(response)
-    }
+    private fun listingUrl(page: Int, sort: String): HttpUrl = "$baseUrl$sectionPath".toHttpUrl().newBuilder()
+        .addQueryParameter("sst", sort)
+        .addQueryParameter("sod", "desc")
+        .addQueryParameter("page", page.toString())
+        .build()
 
-    private fun listingRequest(page: Int, sort: String): Request {
-        val url = "$baseUrl$sectionPath".toHttpUrl().newBuilder()
-            .addQueryParameter("sst", sort)
-            .addQueryParameter("sod", "desc")
-            .addQueryParameter("page", page.toString())
-            .build()
-        return GET(url, headers)
-    }
-
-    private fun listingParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun listingParse(document: Document): MangasPage {
         val itemSelector = "#webtoon-list-all > li:has(a[href^=\"$sectionPath/\"])"
         val mangas = document.select(itemSelector).map { element ->
             val link = element.selectFirst("a[href^=\"$sectionPath/\"]")
@@ -126,9 +87,8 @@ class Ntk(
                 setUrlWithoutDomain(link.absUrl("href"))
                 title = element.selectFirst("span.title")?.text()
                     ?: throw Exception("제목을 찾을 수 없습니다.")
-                thumbnail_url = element.selectFirst("img.theme-thumb-img")?.attr("abs:src")
-                genre = element.attr("data-genre")
-                    .takeIf(String::isNotEmpty)
+                thumbnail_url = element.selectFirst("img.theme-thumb-img")?.attrOrNull("abs:src")
+                genre = element.attrOrNull("data-genre")
                     ?.split(",")
                     ?.joinToString { it.trim() }
                 status = if (element.selectFirst(".theme-completed-badge") != null) {
@@ -138,11 +98,10 @@ class Ntk(
                 }
             }
         }
-        return MangasPage(mangas, hasNextPage(document, response))
+        return MangasPage(mangas, hasNextPage(document))
     }
 
-    private fun updatesParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun updatesParse(document: Document): MangasPage {
         val mangas = document.select(".theme-update-webzine .post-list").map { element ->
             val link = element.selectFirst("a.theme-update-all-link")
                 ?: throw Exception("작품 주소를 찾을 수 없습니다.")
@@ -151,19 +110,26 @@ class Ntk(
                 setUrlWithoutDomain(link.absUrl("href"))
                 title = element.selectFirst(".theme-update-subject-title")?.text()
                     ?: throw Exception("제목을 찾을 수 없습니다.")
-                thumbnail_url = element.selectFirst("img.theme-thumb-img")?.attr("abs:src")
-                author = tags.getOrNull(0)?.text()?.takeIf(String::isNotEmpty)
-                genre = tags.getOrNull(1)?.text()
-                    ?.takeIf(String::isNotEmpty)
+                thumbnail_url = element.selectFirst("img.theme-thumb-img")?.attrOrNull("abs:src")
+                author = tags.getOrNull(0)?.textOrNull()
+                genre = tags.getOrNull(1)?.textOrNull()
                     ?.split(",")
                     ?.joinToString { it.trim() }
             }
         }
-        return MangasPage(mangas, hasNextPage(document, response))
+        return MangasPage(mangas, hasNextPage(document))
     }
 
-    private fun hasNextPage(document: Document, response: Response): Boolean {
-        val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
+    private fun hasNextPage(document: Document): Boolean {
+        val currentPage = document.selectFirst(".pagination li.active, .pg_current")
+            ?.text()
+            ?.toIntOrNull()
+            ?: document.selectFirst("link[rel=canonical][href]")
+                ?.absUrl("href")
+                ?.toHttpUrlOrNull()
+                ?.queryParameter("page")
+                ?.toIntOrNull()
+            ?: 1
         return document.select(".pagination a[href], a.pg_page[href]").any { link ->
             link.absUrl("href").toHttpUrlOrNull()
                 ?.queryParameter("page")
@@ -171,16 +137,21 @@ class Ntk(
         }
     }
 
-    override fun searchMangaRequest(
-        page: Int,
-        query: String,
-        filters: FilterList,
-    ): Request {
+    private fun hasNextEpisodePage(document: Document, currentPage: Int): Boolean = document.select("a.pg_page[href]").any { link ->
+        link.absUrl("href").toHttpUrlOrNull()
+            ?.queryParameter("epage")
+            ?.toIntOrNull() == currentPage + 1
+    }
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = listingParse(client.get(searchUrl(page, query, filters)).asJsoup())
+
+    private fun searchUrl(page: Int, query: String, filters: FilterList): HttpUrl {
         val builder = "$baseUrl$sectionPath".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
 
         if (query.isNotBlank()) {
             builder.addQueryParameter("stx", query)
+                .addQueryParameter("kind", sectionPath.removePrefix("/"))
         } else {
             val sort = filters.firstInstance<SortFilter>().value
             val genre = filters.firstInstance<GenreFilter>().value
@@ -204,42 +175,71 @@ class Ntk(
             }
         }
 
-        return GET(builder.build(), headers)
+        return builder.build()
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = listingParse(response)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst(".theme-detail-title-line")?.text()
-                ?: throw Exception("제목을 찾을 수 없습니다.")
-            author = document
-                .selectFirst(".theme-detail-info-row:first-child .theme-detail-info-value")
-                ?.text()
-            description = document.selectFirst(".theme-detail-description")?.text()
-            thumbnail_url = document.selectFirst(".view-title .col-sm-4 img")?.attr("abs:src")
-            genre = document
-                .selectFirst(".theme-detail-info-row:nth-child(2) .theme-detail-info-value")
-                ?.text()
-                ?.replace("#", "")
-                ?.takeIf(String::isNotEmpty)
-            status = document
-                .selectFirst(".theme-detail-info-row:nth-child(3) .theme-detail-info-value")
-                ?.text()
-                .let {
-                    when {
-                        it == null -> SManga.UNKNOWN
-                        it.contains("연재중") -> SManga.ONGOING
-                        it.contains("완결") -> SManga.COMPLETED
-                        else -> SManga.UNKNOWN
-                    }
-                }
-            initialized = true
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (!url.encodedPath.startsWith(sectionPath)) return null
+        val targetUrl = url.newBuilder().host(baseUrl.toHttpUrl().host).build()
+        val document = client.get(targetUrl).asJsoup()
+        return mangaDetailsParse(document).apply {
+            setUrlWithoutDomain(targetUrl.toString())
         }
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> = response.asJsoup()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        // Details and chapters come from the same page, so fetch once and
+        // return both regardless of the flags.
+        val mangaUrl = getMangaUrl(manga).toHttpUrl()
+        var document = client.get(mangaUrl).asJsoup()
+        val details = mangaDetailsParse(document)
+
+        // The chapter list caps at 100 rows per page and paginates via `epage`,
+        // a different query key from the listing pages' `page`.
+        val chapterList = chapterListParse(document).toMutableList()
+        var epage = 1
+        while (hasNextEpisodePage(document, epage)) {
+            epage++
+            document = client.get(mangaUrl.newBuilder().setQueryParameter("epage", epage.toString()).build()).asJsoup()
+            chapterList += chapterListParse(document)
+        }
+
+        return SMangaUpdate(details, chapterList.groupVolumeChapters())
+    }
+
+    private fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+        title = document.selectFirst(".theme-detail-title-line")?.text()
+            ?: throw Exception("제목을 찾을 수 없습니다.")
+        author = document
+            .selectFirst(".theme-detail-info-row:first-child .theme-detail-info-value")
+            ?.textOrNull()
+        description = document.selectFirst(".theme-detail-description")?.textOrNull()
+        thumbnail_url = document.selectFirst(".view-title .col-sm-4 img")?.attrOrNull("abs:src")
+        genre = document
+            .selectFirst(".theme-detail-info-row:nth-child(2) .theme-detail-info-value")
+            ?.textOrNull()
+            ?.replace("#", "")
+            ?.takeIf(String::isNotEmpty)
+        status = document
+            .selectFirst(".theme-detail-info-row:nth-child(3) .theme-detail-info-value")
+            ?.textOrNull()
+            .let {
+                when {
+                    it == null -> SManga.UNKNOWN
+                    it.contains("연재중") -> SManga.ONGOING
+                    it.contains("완결") -> SManga.COMPLETED
+                    else -> SManga.UNKNOWN
+                }
+            }
+        initialized = true
+    }
+
+    private fun chapterListParse(document: Document): List<SChapter> = document
         .select("div.serial-list ul.list-body > li.list-item")
         .map { row ->
             val link = row.selectFirst("a.item-subject")
@@ -247,25 +247,38 @@ class Ntk(
             SChapter.create().apply {
                 setUrlWithoutDomain(link.absUrl("href"))
                 name = link.ownText()
-                chapter_number = row.selectFirst("div.wr-num")
-                    ?.text()
-                    ?.toFloatOrNull()
-                    ?: -1F
-                date_upload = chapterDateFormat.tryParse(
-                    row.selectFirst("div.wr-date")?.text(),
+                // Let Mihon recognize episode parts such as 25-1화 and titled episodes
+                // such as "5화. 부제". Volumes and specials must stay unnumbered so
+                // e.g. 77권 cannot collide with 77화.
+                chapter_number = if (isEpisode(name)) -1F else -2F
+                date_upload = chapterDateFormat.tryParseDate(
+                    row.selectFirst("div.wr-date")?.textOrNull(),
+                    KOREA_ZONE,
                 )
             }
         }
 
-    // Reader images are injected client-side and do not exist in the downloaded HTML.
-    override fun pageListParse(response: Response): List<Page> = throw Exception(
-        "뉴토끼는 회차 이미지를 브라우저에서 동적으로 불러옵니다. " +
-            "작품 화면에서 WebView 또는 브라우저로 읽어주세요.",
-    )
+    private fun List<SChapter>.groupVolumeChapters(): List<SChapter> {
+        if (sectionPath != MANHWA_PATH) {
+            return this
+        }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+        val (episodes, otherChapters) = partition { isEpisode(it.name) }
+        val (volumes, specials) = otherChapters.partition { isVolume(it.name) }
+        // The site interleaves numbered episodes and collected volumes.
+        return specials + volumes + episodes
+    }
 
-    override fun getFilterList(): FilterList {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val requestHeaders = headers.newBuilder()
+            .set(NTK_READER_HEADER, "1")
+            .build()
+        return client.get(getChapterUrl(chapter), requestHeaders)
+            .parseAs<NtkImagesResponse>()
+            .toPages()
+    }
+
+    override fun getFilterList(data: JsonElement?): FilterList {
         val filters = mutableListOf<Filter<*>>(
             Filter.Header("키워드 검색 시 필터는 적용되지 않습니다."),
             SortFilter(),
@@ -301,48 +314,21 @@ class Ntk(
 
     private class GenreFilter(options: Array<Pair<String, String>>) : SelectFilter("장르", options)
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = DOMAIN_PREF
-            title = "도메인"
-            setDefaultValue(DOMAIN_DEFAULT)
-            dialogTitle = "도메인"
-            dialogMessage =
-                "예: https://newtoki1.org\n주소 변경 시 공지된 newtoki숫자.org 도메인을 입력하세요."
-
-            // Both sources must use the same domain preference.
-            val current = preferences.getString(DOMAIN_PREF, DOMAIN_DEFAULT)!!
-            text = current
-            summary = buildDomainSummary(current)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val normalized = normalizeDomain(newValue as String)
-                preferences.edit().putString(DOMAIN_PREF, normalized).apply()
-                text = normalized
-                summary = buildDomainSummary(normalized)
-                false
-            }
-        }.also(screen::addPreference)
-    }
-
-    private fun buildDomainSummary(value: String): String = "현재: $value\n주소가 바뀌면 공지된 newtoki숫자.org 도메인을 입력한 뒤 " +
-        "앱을 다시 시작하세요."
-
-    private fun normalizeDomain(raw: String): String {
-        val trimmed = raw.trim().trimEnd('/')
-        return when {
-            trimmed.isEmpty() -> DOMAIN_DEFAULT
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
-            else -> "https://$trimmed"
-        }
-    }
-
     companion object {
-        private const val SHARED_PREF_NAME = "source_ntk_shared"
-        private const val DOMAIN_PREF = "domain"
-        private const val DOMAIN_DEFAULT = "https://newtoki1.org"
         private const val WEBTOON_PATH = "/webtoon"
         private const val MANHWA_PATH = "/manhwa"
+
+        private val KOREA_ZONE = ZoneId.of("Asia/Seoul")
+
+        // Not anchored to the end: the site titles episodes like "5화. 부제" and
+        // "연상녀클럽 6화". The lookahead keeps 화/권 from matching inside a word.
+        private val EPISODE_REGEX = Regex("""\d+(?:\.\d+)?\s*화(?!\p{L})""")
+        private val VOLUME_REGEX = Regex("""\d+(?:\.\d+)?\s*권(?!\p{L})""")
+
+        private fun isVolume(name: String) = VOLUME_REGEX.containsMatchIn(name)
+
+        // A volume that mentions episodes ("77권 (300화~305화)") stays a volume.
+        private fun isEpisode(name: String) = !isVolume(name) && EPISODE_REGEX.containsMatchIn(name)
 
         // Must match build.gradle.kts. Pinned so updates keep users' libraries.
         private const val MANHWA_ID = 7381471216199971485L
