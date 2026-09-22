@@ -45,7 +45,9 @@ refuse an update signed by a different key.
   the dispatcher thread and takes the app down.
 - **Chapter lists paginate on `epage`**, not the `page` key the listing pages
   use, and cap at 100 rows per page. `fetchMangaUpdate` walks every page;
-  grouping runs once on the merged list.
+  grouping runs once on the merged list. A stored manga URL must never carry
+  `epage`: the walk starts from whatever page that URL names, and since a page
+  never links to itself the loop ends immediately and keeps only 100 chapters.
 - **Networking.** The rate limit is scoped to the main host so image requests
   to the CDN are not throttled. `Dto.kt` redirects the dead `aws-cdn1.site`
   host, whose certificate expired, to an active CDN.

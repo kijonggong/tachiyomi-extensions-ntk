@@ -6,14 +6,13 @@ plugins {
 
 keiyoushi {
     name = "NTK"
-    versionCode = 38
+    versionCode = 39
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
-    // Both sources share one user-overridable domain (see Ntk.DOMAIN_PREF), so the
-    // baseUrl here is only the shipped default. Source names must stay byte-identical
-    // to the published v19's, or existing installs get new source ids and detach
-    // libraries. KSP generates the SourceFactory from these blocks.
+    // baseUrl here is only the shipped default; the custom(...) block below makes
+    // it user-overridable. Source names must stay byte-identical to the published
+    // v19's, or existing installs get new source ids and detach libraries.
     source {
         name = "NTK 만화"
         lang = "ko"

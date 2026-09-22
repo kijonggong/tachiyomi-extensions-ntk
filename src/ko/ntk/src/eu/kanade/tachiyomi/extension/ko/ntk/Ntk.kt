@@ -180,7 +180,10 @@ abstract class Ntk : KeiSource() {
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
         if (!url.encodedPath.startsWith(sectionPath)) return null
-        val targetUrl = url.newBuilder().host(baseUrl.toHttpUrl().host).build()
+        val targetUrl = url.newBuilder()
+            .host(baseUrl.toHttpUrl().host)
+            .removeAllQueryParameters("epage")
+            .build()
         val document = client.get(targetUrl).asJsoup()
         return mangaDetailsParse(document).apply {
             setUrlWithoutDomain(targetUrl.toString())
@@ -195,7 +198,11 @@ abstract class Ntk : KeiSource() {
     ): SMangaUpdate {
         // Details and chapters come from the same page, so fetch once and
         // return both regardless of the flags.
-        val mangaUrl = getMangaUrl(manga).toHttpUrl()
+        // A URL saved before epage was stripped can still carry it, and the loop
+        // below only works from page 1.
+        val mangaUrl = getMangaUrl(manga).toHttpUrl().newBuilder()
+            .removeAllQueryParameters("epage")
+            .build()
         var document = client.get(mangaUrl).asJsoup()
         val details = mangaDetailsParse(document)
 
