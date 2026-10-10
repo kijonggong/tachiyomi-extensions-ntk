@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "NTK"
-    versionCode = 39
+    versionCode = 42
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 

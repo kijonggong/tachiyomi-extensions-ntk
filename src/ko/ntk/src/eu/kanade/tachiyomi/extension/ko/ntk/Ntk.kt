@@ -35,12 +35,14 @@ abstract class Ntk : KeiSource() {
     // per-source paths have to be derived from the injected id.
     private val sectionPath by lazy { if (id == MANHWA_ID) MANHWA_PATH else WEBTOON_PATH }
 
+    private val siteHost by lazy { baseUrl.toHttpUrl().host }
+
     // Only 만화 has a dedicated "최신" page; 웹툰 reuses its listing sorted by update.
     private val updatesPath by lazy { if (id == MANHWA_ID) "$MANHWA_PATH/updates" else null }
 
     // Limit the site itself only. Thumbnails come from aws-cdn1.site and
     // image-comic.pstatic.net, and throttling those stalls list scrolling.
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(2) { it.host == baseUrl.toHttpUrl().host }
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(2) { it.host == siteHost }
         .addInterceptor(NtkReaderInterceptor())
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
@@ -137,10 +139,17 @@ abstract class Ntk : KeiSource() {
         }
     }
 
-    private fun hasNextEpisodePage(document: Document, currentPage: Int): Boolean = document.select("a.pg_page[href]").any { link ->
-        link.absUrl("href").toHttpUrlOrNull()
-            ?.queryParameter("epage")
-            ?.toIntOrNull() == currentPage + 1
+    private fun hasNextEpisodePage(document: Document, currentPage: Int): Boolean {
+        val linkedPages = document.select("a.pg_page[href]").mapNotNull { link ->
+            link.absUrl("href").toHttpUrlOrNull()
+                ?.queryParameter("epage")
+                ?.toIntOrNull()
+        }
+        // The pager only links a window of page numbers, so requiring the exact next number would
+        // end the loop early on a page whose own number falls outside that window.
+        // Do not fall back to the row count: the site clamps a past-the-end `epage` to the last
+        // page, so a full page of rows does not prove another page exists.
+        return linkedPages.any { it > currentPage }
     }
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = listingParse(client.get(searchUrl(page, query, filters)).asJsoup())
@@ -163,12 +172,25 @@ abstract class Ntk : KeiSource() {
                     "toon",
                     filters.firstInstance<CategoryFilter>().value,
                 )
+                    .addQueryParameter(
+                        "yoil",
+                        filters.firstInstance<DayFilter>().value,
+                    )
+                    .addQueryParameter(
+                        "plat",
+                        filters.firstInstance<PlatformFilter>().value,
+                    )
             } else {
                 builder.addQueryParameter(
                     "pub",
                     filters.firstInstance<StatusFilter>().value,
                 )
             }
+
+            builder.addQueryParameter(
+                "jaum",
+                filters.firstInstance<InitialFilter>().value,
+            )
 
             if (genre.isNotEmpty()) {
                 builder.addQueryParameter("tag", genre)
@@ -179,12 +201,25 @@ abstract class Ntk : KeiSource() {
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (!url.encodedPath.startsWith(sectionPath)) return null
+        // Only work pages resolve here. Everything else under the section - episode URLs
+        // (/manhwa/{work}/{episode}, which deeplinks and shared chapter links match), the
+        // /manhwa/updates listing and the section root - must return null so the app reports
+        // a missing title instead of failing while the entry loads.
+        val segments = url.pathSegments.filter(String::isNotEmpty)
+        if (segments.size != 2 || "/${segments.first()}" != sectionPath) return null
+
         val targetUrl = url.newBuilder()
-            .host(baseUrl.toHttpUrl().host)
+            .host(siteHost)
             .removeAllQueryParameters("epage")
             .build()
         val document = client.get(targetUrl).asJsoup()
+        // An unknown id still renders a titled page ("작품을 찾을 수 없습니다") without a chapter
+        // list, so require the chapter list that only a real work page has.
+        if (document.selectFirst(DETAIL_TITLE_SELECTOR) == null ||
+            document.selectFirst(CHAPTER_ROW_SELECTOR) == null
+        ) {
+            return null
+        }
         return mangaDetailsParse(document).apply {
             setUrlWithoutDomain(targetUrl.toString())
         }
@@ -210,7 +245,7 @@ abstract class Ntk : KeiSource() {
         // a different query key from the listing pages' `page`.
         val chapterList = chapterListParse(document).toMutableList()
         var epage = 1
-        while (hasNextEpisodePage(document, epage)) {
+        while (epage < MAX_CHAPTER_PAGES && hasNextEpisodePage(document, epage)) {
             epage++
             document = client.get(mangaUrl.newBuilder().setQueryParameter("epage", epage.toString()).build()).asJsoup()
             chapterList += chapterListParse(document)
@@ -220,7 +255,7 @@ abstract class Ntk : KeiSource() {
     }
 
     private fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        title = document.selectFirst(".theme-detail-title-line")?.text()
+        title = document.selectFirst(DETAIL_TITLE_SELECTOR)?.text()
             ?: throw Exception("제목을 찾을 수 없습니다.")
         author = document
             .selectFirst(".theme-detail-info-row:first-child .theme-detail-info-value")
@@ -247,7 +282,7 @@ abstract class Ntk : KeiSource() {
     }
 
     private fun chapterListParse(document: Document): List<SChapter> = document
-        .select("div.serial-list ul.list-body > li.list-item")
+        .select(CHAPTER_ROW_SELECTOR)
         .map { row ->
             val link = row.selectFirst("a.item-subject")
                 ?: throw Exception("회차 주소를 찾을 수 없습니다.")
@@ -293,10 +328,13 @@ abstract class Ntk : KeiSource() {
         if (sectionPath == WEBTOON_PATH) {
             filters += CategoryFilter()
             filters += GenreFilter(WEBTOON_GENRE_OPTIONS)
+            filters += DayFilter()
+            filters += PlatformFilter()
         } else {
             filters += StatusFilter()
             filters += GenreFilter(MANHWA_GENRE_OPTIONS)
         }
+        filters += InitialFilter()
         return FilterList(filters)
     }
 
@@ -321,14 +359,20 @@ abstract class Ntk : KeiSource() {
 
     private class GenreFilter(options: Array<Pair<String, String>>) : SelectFilter("장르", options)
 
+    private class InitialFilter : SelectFilter("초성", INITIAL_OPTIONS)
+
+    private class DayFilter : SelectFilter("요일", DAY_OPTIONS)
+
+    private class PlatformFilter : SelectFilter("플랫폼", PLATFORM_OPTIONS)
+
     companion object {
         private const val WEBTOON_PATH = "/webtoon"
         private const val MANHWA_PATH = "/manhwa"
 
         private val KOREA_ZONE = ZoneId.of("Asia/Seoul")
 
-        // Not anchored to the end: the site titles episodes like "5화. 부제" and
-        // "연상녀클럽 6화". The lookahead keeps 화/권 from matching inside a word.
+        // Episodes are numbered like "1194화" or "73-2화" and may carry a subtitle
+        // ("5화. 부제"). The lookahead keeps 화/권 from matching inside a word.
         private val EPISODE_REGEX = Regex("""\d+(?:\.\d+)?\s*화(?!\p{L})""")
         private val VOLUME_REGEX = Regex("""\d+(?:\.\d+)?\s*권(?!\p{L})""")
 
@@ -340,6 +384,13 @@ abstract class Ntk : KeiSource() {
         // Must match build.gradle.kts. Pinned so updates keep users' libraries.
         private const val MANHWA_ID = 7381471216199971485L
 
+        private const val DETAIL_TITLE_SELECTOR = ".theme-detail-title-line"
+        private const val CHAPTER_ROW_SELECTOR = "div.serial-list ul.list-body > li.list-item"
+
+        // The site's chapter list paginates via `epage`, a different query key from the listing
+        // pages' `page`. The pager window means the loop needs its own bound.
+        private const val MAX_CHAPTER_PAGES = 200
+
         private val SORT_OPTIONS = arrayOf(
             "최신순" to "as_update",
             "신작순" to "as_new",
@@ -347,6 +398,62 @@ abstract class Ntk : KeiSource() {
             "조회순" to "as_view",
             "평점순" to "as_rating",
             "화수순" to "as_episode",
+        )
+
+        // Matches the site's listing filter buttons (s-jaum / s-yoil / s-plat).
+        private val INITIAL_OPTIONS = arrayOf(
+            "전체" to "",
+            "ㄱ" to "ㄱ",
+            "ㄴ" to "ㄴ",
+            "ㄷ" to "ㄷ",
+            "ㄹ" to "ㄹ",
+            "ㅁ" to "ㅁ",
+            "ㅂ" to "ㅂ",
+            "ㅅ" to "ㅅ",
+            "ㅇ" to "ㅇ",
+            "ㅈ" to "ㅈ",
+            "ㅊ" to "ㅊ",
+            "ㅋ" to "ㅋ",
+            "ㅌ" to "ㅌ",
+            "ㅍ" to "ㅍ",
+            "ㅎ" to "ㅎ",
+            "a-z" to "a-z",
+            "0-9" to "0-9",
+        )
+
+        private val DAY_OPTIONS = arrayOf(
+            "전체" to "",
+            "월" to "월",
+            "화" to "화",
+            "수" to "수",
+            "목" to "목",
+            "금" to "금",
+            "토" to "토",
+            "일" to "일",
+            "열흘" to "열흘",
+        )
+
+        // Platform ids the site's own filter omits but the listing still honours.
+        private val PLATFORM_OPTIONS = arrayOf(
+            "전체" to "",
+            "네이버" to "1",
+            "다음" to "2",
+            "카카오" to "3",
+            "레진" to "4",
+            "투믹스" to "5",
+            "탑툰" to "6",
+            "코미카" to "7",
+            "배틀코믹스" to "8",
+            "코믹GT" to "9",
+            "케이툰" to "10",
+            "애니툰" to "11",
+            "폭스툰" to "12",
+            "피너툰" to "13",
+            "봄툰" to "14",
+            "코미코" to "15",
+            "무툰" to "16",
+            "리디북스" to "18",
+            "기타" to "99",
         )
 
         private val CATEGORY_OPTIONS = arrayOf(
