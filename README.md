@@ -12,6 +12,7 @@ branch holds the code they are built from.
     src/ko/ntk/src/                Ntk.kt               listings, details, chapters
                                    Dto.kt               reader image payload
                                    ReaderInterceptor.kt WebView image capture
+    src/ko/ntk/tools/verify.py     offline checks for the parsing rules
 
 ## Building
 
@@ -27,6 +28,27 @@ The build emits the APK, a signed JAR, and `keiyoushi-source-info.json`
 Signing needs `signingkey.jks` plus `KEY_STORE_PASSWORD` / `KEY_PASSWORD` /
 `ALIAS`. **The published key must not change** — installs already in the wild
 refuse an update signed by a different key.
+
+## Checks
+
+    python src/ko/ntk/tools/verify.py
+
+Covers the rules that regress silently: chapter-name classification, the
+`getMangaByUrl` path guard, and the platform option ids. The app-facing path
+needs a Ktor source stream, so the checks that require a device are listed at
+the end of that script and have to be run by hand.
+
+## Syncing this branch
+
+This branch is a snapshot, not a history: each commit mirrors whatever
+`src/ko/ntk/` held when that version was published. Regenerate it after a
+release with the helper in the working checkout, which reads `versionCode`
+from `build.gradle.kts` so the message cannot drift from the build:
+
+    python _scratch/sync_source.py --push
+
+Keep the two branches on the same version. The published build must be built
+from the code committed here.
 
 ## Notes for future maintenance
 
@@ -48,6 +70,24 @@ refuse an update signed by a different key.
   grouping runs once on the merged list. A stored manga URL must never carry
   `epage`: the walk starts from whatever page that URL names, and since a page
   never links to itself the loop ends immediately and keeps only 100 chapters.
+- **The chapter loop must not trust the row count.** The site clamps a
+  past-the-end `epage` to the last page and answers 200 with that page's rows,
+  so a full page does not prove another page exists; and the pager links only a
+  window of page numbers, so requiring `epage = current + 1` exactly ends the
+  loop early. It stops on "no linked page greater than the current one", with a
+  page cap as a backstop.
+- **Some URLs must resolve to nothing.** An unknown work id still renders a
+  title (`작품을 찾을 수 없습니다`) with no chapter list, and episode URLs
+  (`/manhwa/{work}/{episode}`) are matched by the deeplinks but have no detail
+  markup at all. `getMangaByUrl` requires two path segments plus a chapter list,
+  so both cases return null instead of throwing while the entry loads.
+- **Filters are not uniform.** 초성 only works on the HTML listing; the site's
+  JSON API ignores it. Platform ids 2, 9, 11, 12 and 16 are honoured by the
+  listing even though the site's own filter buttons no longer list them.
+- **The site also exposes JSON listings** at `/api/manhwa-list` and `/api/works`,
+  whose `sourceWorkId` equals the id in the stored URL. They are not used here
+  (the HTML path covers 초성 and search, and its sorting matches), but they are
+  the fallback if HTML parsing breaks.
 - **Networking.** The rate limit is scoped to the main host so image requests
   to the CDN are not throttled. `Dto.kt` redirects the dead `aws-cdn1.site`
   host, whose certificate expired, to an active CDN.
